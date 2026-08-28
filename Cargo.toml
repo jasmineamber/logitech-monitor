@@ -1,0 +1,39 @@
+[package]
+name = "logitech-monitor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+description = "A small Windows CLI for reading Logitech HID++ device battery status"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+openlogi-core = { git = "https://github.com/AprilNEA/OpenLogi.git", rev = "273ac406dea9c1c8950dac567598cc9416111c46" }
+openlogi-hid = { git = "https://github.com/AprilNEA/OpenLogi.git", rev = "273ac406dea9c1c8950dac567598cc9416111c46" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+notify-rust = "4.18"
+tray-icon = { version = "0.24", default-features = false }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.55"

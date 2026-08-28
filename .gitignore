@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+/target-*/
+
+# Local application state
+/config.toml
+
+# Windows build artifacts
+*.exe
+*.pdb
+*.ilk
+
+# IDE and editor files
+.idea/
+.vscode/
+
+# Local logs and OS metadata
+*.log
+.DS_Store
+Thumbs.db
