@@ -34,7 +34,7 @@ use crate::{
 const SETTINGS_ID: &str = "settings";
 const EXIT_ID: &str = "exit";
 const SETTINGS_VIEWPORT_ID: &str = "settings-window";
-const SETTINGS_WINDOW_TITLE: &str = "设置 - 罗技电量管家";
+const SETTINGS_WINDOW_TITLE: &str = "设置 - 电量管家";
 static ROOT_VIEWPORTS: OnceLock<Vec<isize>> = OnceLock::new();
 
 const CHINESE_FONT_PATHS: [&str; 4] = [
@@ -83,7 +83,6 @@ pub(crate) fn run() -> Result<()> {
         config: loaded.config,
         config_path,
         devices: Vec::new(),
-        selected_device: None,
         event_receiver,
         monitor_commands,
         menu: tray_menu,
@@ -126,7 +125,6 @@ struct TrayApp {
     config: Config,
     config_path: PathBuf,
     devices: Vec<DeviceSnapshot>,
-    selected_device: Option<String>,
     event_receiver: Receiver<MonitorEvent>,
     monitor_commands: tokio::sync::mpsc::Sender<MonitorCommand>,
     menu: TrayMenu,
@@ -615,27 +613,17 @@ impl TrayApp {
     fn process_monitor_events(&mut self) {
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
-                MonitorEvent::Devices {
-                    devices,
-                    selected_device,
-                    alert,
-                } => {
+                MonitorEvent::Devices { devices, alerts } => {
                     self.devices = devices;
-                    self.selected_device = selected_device.clone();
                     self.menu
-                        .rebuild_devices(&self.devices, self.selected_device.as_deref());
+                        .rebuild_devices(&self.devices, &self.config.monitored_devices);
 
-                    if self.config.selected_device != selected_device {
-                        self.config.selected_device = selected_device;
-                        self.persist_config();
-                        self.send_config_update();
-                    }
-
-                    if let Some(alert) = alert
-                        && let Err(error) =
+                    for alert in alerts {
+                        if let Err(error) =
                             show_low_battery_notification(&alert.device_name, alert.percentage)
-                    {
-                        self.status = Some(error.to_string());
+                        {
+                            self.status = Some(error.to_string());
+                        }
                     }
                 }
                 MonitorEvent::ScanFailed(error) => {
@@ -661,10 +649,18 @@ impl TrayApp {
                 let _ = self.monitor_commands.try_send(MonitorCommand::Shutdown);
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if let Some(device_id) = self.menu.device_ids.get(&event.id).cloned() {
-                self.config.selected_device = Some(device_id.clone());
-                self.selected_device = Some(device_id);
+                if let Some(index) = self
+                    .config
+                    .monitored_devices
+                    .iter()
+                    .position(|id| id == &device_id)
+                {
+                    self.config.monitored_devices.remove(index);
+                } else {
+                    self.config.monitored_devices.push(device_id);
+                }
                 self.menu
-                    .rebuild_devices(&self.devices, self.selected_device.as_deref());
+                    .rebuild_devices(&self.devices, &self.config.monitored_devices);
                 self.persist_config();
                 self.send_config_update();
             }
@@ -708,7 +704,7 @@ impl TrayApp {
             threshold,
             poll_interval_seconds,
             repeat_alert_interval_minutes,
-            selected_device: self.config.selected_device.clone(),
+            monitored_devices: self.config.monitored_devices.clone(),
             autostart: settings.autostart,
         };
         next_config.validate()?;
@@ -778,12 +774,12 @@ impl TrayMenu {
         })
     }
 
-    fn rebuild_devices(&mut self, devices: &[DeviceSnapshot], selected_id: Option<&str>) {
+    fn rebuild_devices(&mut self, devices: &[DeviceSnapshot], monitored_devices: &[String]) {
         while self.devices.remove_at(0).is_some() {}
         self.device_ids.clear();
 
         if devices.is_empty() {
-            let item = MenuItem::with_id("device:none", "未找到罗技设备", false, None);
+            let item = MenuItem::with_id("device:none", "未找到兼容设备", false, None);
             let _ = self.devices.append(&item);
             return;
         }
@@ -793,8 +789,8 @@ impl TrayMenu {
             let item = CheckMenuItem::with_id(
                 menu_id.clone(),
                 format_device_label(device),
-                device.online,
-                selected_id == Some(device.id.as_str()),
+                true,
+                monitored_devices.iter().any(|id| id == &device.id),
                 None,
             );
             let _ = self.devices.append(&item);

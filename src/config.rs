@@ -22,7 +22,7 @@ pub(crate) struct Config {
     pub(crate) threshold: u8,
     pub(crate) poll_interval_seconds: u64,
     pub(crate) repeat_alert_interval_minutes: u64,
-    pub(crate) selected_device: Option<String>,
+    pub(crate) monitored_devices: Vec<String>,
     pub(crate) autostart: bool,
 }
 
@@ -32,7 +32,7 @@ impl Default for Config {
             threshold: DEFAULT_THRESHOLD,
             poll_interval_seconds: DEFAULT_POLL_INTERVAL_SECONDS,
             repeat_alert_interval_minutes: DEFAULT_REPEAT_ALERT_INTERVAL_MINUTES,
-            selected_device: None,
+            monitored_devices: Vec::new(),
             autostart: false,
         }
     }
@@ -42,10 +42,13 @@ impl Config {
     pub(crate) fn load(path: &Path) -> Result<ConfigLoad> {
         match fs::read_to_string(path) {
             Ok(contents) => match toml::from_str::<Self>(&contents) {
-                Ok(config) if config.validate().is_ok() => Ok(ConfigLoad {
-                    config,
-                    warning: None,
-                }),
+                Ok(mut config) if config.validate().is_ok() => {
+                    migrate_legacy_selection(&contents, &mut config);
+                    Ok(ConfigLoad {
+                        config,
+                        warning: None,
+                    })
+                }
                 Ok(_) => Ok(ConfigLoad {
                     config: Self::default(),
                     warning: Some("配置中的数值超出允许范围".to_string()),
@@ -95,6 +98,26 @@ impl Config {
     }
 }
 
+fn migrate_legacy_selection(contents: &str, config: &mut Config) {
+    let Ok(document) = toml::from_str::<toml::Value>(contents) else {
+        return;
+    };
+
+    if document.get("monitored_devices").is_some() {
+        return;
+    }
+
+    let Some(selected_device) = document
+        .get("selected_device")
+        .and_then(toml::Value::as_str)
+        .filter(|device| !device.trim().is_empty())
+    else {
+        return;
+    };
+
+    config.monitored_devices = vec![selected_device.to_string()];
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfigLoad {
     pub(crate) config: Config,
@@ -118,6 +141,7 @@ mod tests {
         assert_eq!(Config::default().threshold, 20);
         assert_eq!(Config::default().poll_interval_seconds, 60);
         assert_eq!(Config::default().repeat_alert_interval_minutes, 5);
+        assert!(Config::default().monitored_devices.is_empty());
         assert!(!Config::default().autostart);
     }
 
@@ -127,7 +151,7 @@ mod tests {
             threshold: 35,
             poll_interval_seconds: 120,
             repeat_alert_interval_minutes: 10,
-            selected_device: Some("device-1".to_string()),
+            monitored_devices: vec!["device-1".to_string(), "device-2".to_string()],
             autostart: true,
         };
 
@@ -192,7 +216,7 @@ mod tests {
     #[test]
     fn malformed_file_uses_defaults_and_reports_a_warning() {
         let path = std::env::temp_dir().join(format!(
-            "logitech-monitor-config-test-{}.toml",
+            "battery-monitor-config-test-{}.toml",
             std::process::id()
         ));
         fs::write(&path, "threshold = 100\n").expect("test config should be writable");
@@ -205,14 +229,23 @@ mod tests {
     }
 
     #[test]
-    fn old_config_without_repeat_interval_uses_default() {
-        let decoded: Config = toml::from_str(
+    fn old_config_migrates_selected_device() {
+        let path = std::env::temp_dir().join(format!(
+            "battery-monitor-legacy-config-test-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
             "threshold = 35\npoll_interval_seconds = 120\nselected_device = 'device-1'\nautostart = true\n",
         )
-        .expect("old config should deserialize");
+        .expect("test config should be writable");
 
-        assert_eq!(decoded.repeat_alert_interval_minutes, 5);
-        assert_eq!(decoded.threshold, 35);
-        assert_eq!(decoded.poll_interval_seconds, 120);
+        let loaded = Config::load(&path).expect("config should load");
+
+        assert_eq!(loaded.config.repeat_alert_interval_minutes, 5);
+        assert_eq!(loaded.config.threshold, 35);
+        assert_eq!(loaded.config.poll_interval_seconds, 120);
+        assert_eq!(loaded.config.monitored_devices, vec!["device-1"]);
+        let _ = fs::remove_file(path);
     }
 }

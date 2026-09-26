@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const VALUE_NAME: &str = "LogitechMonitor";
+const VALUE_NAME: &str = "BatteryMonitor";
 
 pub(crate) fn set_enabled(enabled: bool) -> Result<()> {
     let current_user = RegKey::predef(HKEY_CURRENT_USER);

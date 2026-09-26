@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     sync::mpsc::Sender,
     time::{Duration, Instant},
 };
@@ -21,8 +22,7 @@ pub(crate) enum MonitorCommand {
 pub(crate) enum MonitorEvent {
     Devices {
         devices: Vec<DeviceSnapshot>,
-        selected_device: Option<String>,
-        alert: Option<Alert>,
+        alerts: Vec<Alert>,
     },
     ScanFailed(String),
 }
@@ -35,52 +35,63 @@ pub(crate) struct Alert {
 
 #[derive(Debug, Default)]
 struct AlertTracker {
-    device_id: Option<String>,
+    states: HashMap<String, AlertState>,
+    monitored_devices: HashSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct AlertState {
     last_notified_at: Option<Instant>,
 }
 
 impl AlertTracker {
     fn evaluate(
         &mut self,
-        device: Option<&DeviceSnapshot>,
+        devices: &[DeviceSnapshot],
+        monitored_devices: &[String],
         threshold: u8,
         repeat_interval: Duration,
         now: Instant,
-    ) -> Option<Alert> {
-        let device = device?;
+    ) -> Vec<Alert> {
+        let monitored_ids = monitored_devices.iter().cloned().collect::<HashSet<_>>();
+        self.states.retain(|id, _| monitored_ids.contains(id));
+        self.monitored_devices = monitored_ids;
 
-        if self.device_id.as_deref() != Some(device.id.as_str()) {
-            self.device_id = Some(device.id.clone());
-            self.last_notified_at = None;
-        }
+        devices
+            .iter()
+            .filter(|device| self.monitored_devices.contains(&device.id))
+            .filter_map(|device| {
+                let state = self.states.entry(device.id.clone()).or_default();
 
-        if !device.online {
-            return None;
-        }
+                if !device.online {
+                    return None;
+                }
 
-        let battery = device.battery?;
+                let battery = device.battery?;
 
-        if battery.percentage > threshold {
-            self.last_notified_at = None;
-            return None;
-        }
+                if battery.percentage > threshold {
+                    state.last_notified_at = None;
+                    return None;
+                }
 
-        if battery.status != BatteryStatus::Discharging {
-            return None;
-        }
+                if battery.status != BatteryStatus::Discharging {
+                    return None;
+                }
 
-        let should_notify = self
-            .last_notified_at
-            .is_none_or(|last_notified_at| now.duration_since(last_notified_at) >= repeat_interval);
-        if !should_notify {
-            return None;
-        }
+                let should_notify = state.last_notified_at.is_none_or(|last_notified_at| {
+                    now.duration_since(last_notified_at) >= repeat_interval
+                });
+                if !should_notify {
+                    return None;
+                }
 
-        self.last_notified_at = Some(now);
-        Some(Alert {
-            device_name: device.name.clone(),
-            percentage: battery.percentage,
-        })
+                state.last_notified_at = Some(now);
+                Some(Alert {
+                    device_name: device.name.clone(),
+                    percentage: battery.percentage,
+                })
+            })
+            .collect()
     }
 }
 
@@ -124,14 +135,9 @@ async fn run(
             _ = interval.tick() => {
                 match battery::enumerate().await {
                     Ok(devices) => {
-                        let selected_device = config.selected_device.clone().or_else(|| {
-                            devices.iter().find(|device| device.online).map(|device| device.id.clone())
-                        });
-                        let selected = selected_device.as_deref().and_then(|id| {
-                            devices.iter().find(|device| device.id == id)
-                        });
-                        let alert = tracker.evaluate(
-                            selected,
+                        let alerts = tracker.evaluate(
+                            &devices,
+                            &config.monitored_devices,
                             config.threshold,
                             repeat_alert_interval(&config),
                             Instant::now(),
@@ -139,8 +145,7 @@ async fn run(
 
                         let _ = event_sender.send(MonitorEvent::Devices {
                             devices,
-                            selected_device,
-                            alert,
+                            alerts,
                         });
                     }
                     Err(error) => {
@@ -173,7 +178,7 @@ mod tests {
     fn device(id: &str, percentage: u8, status: BatteryStatus) -> DeviceSnapshot {
         DeviceSnapshot {
             id: id.to_string(),
-            name: "Test device".to_string(),
+            name: format!("Test device {id}"),
             online: true,
             battery: Some(BatteryInfo {
                 percentage,
@@ -183,137 +188,144 @@ mod tests {
         }
     }
 
+    fn monitored(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
     #[test]
-    fn initial_low_battery_alerts_and_repeats_after_interval() {
+    fn multiple_devices_alert_independently() {
         let mut tracker = AlertTracker::default();
-        let low = device("one", 20, BatteryStatus::Discharging);
+        let devices = vec![
+            device("one", 20, BatteryStatus::Discharging),
+            device("two", 10, BatteryStatus::Discharging),
+        ];
         let start = Instant::now();
 
-        assert!(
+        let alerts = tracker.evaluate(
+            &devices,
+            &monitored(&["one", "two"]),
+            THRESHOLD,
+            REPEAT_INTERVAL,
+            start,
+        );
+
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].device_name, "Test device one");
+        assert_eq!(alerts[1].device_name, "Test device two");
+    }
+
+    #[test]
+    fn each_device_has_its_own_repeat_interval() {
+        let mut tracker = AlertTracker::default();
+        let devices = vec![
+            device("one", 10, BatteryStatus::Discharging),
+            device("two", 10, BatteryStatus::Discharging),
+        ];
+        let start = Instant::now();
+
+        assert_eq!(
             tracker
-                .evaluate(Some(&low), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_some()
+                .evaluate(
+                    &devices,
+                    &monitored(&["one", "two"]),
+                    THRESHOLD,
+                    REPEAT_INTERVAL,
+                    start,
+                )
+                .len(),
+            2
         );
         assert!(
             tracker
                 .evaluate(
-                    Some(&low),
+                    &devices,
+                    &monitored(&["one", "two"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
                     start + Duration::from_secs(299),
                 )
-                .is_none()
+                .is_empty()
         );
-        assert!(
+        assert_eq!(
             tracker
                 .evaluate(
-                    Some(&low),
+                    &devices,
+                    &monitored(&["one", "two"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
                     start + REPEAT_INTERVAL,
                 )
-                .is_some()
-        );
-        assert!(
-            tracker
-                .evaluate(
-                    Some(&low),
-                    THRESHOLD,
-                    REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL + Duration::from_secs(1),
-                )
-                .is_none()
+                .len(),
+            2
         );
     }
 
     #[test]
-    fn alert_rearms_only_after_recovery_above_threshold() {
+    fn alert_rearms_only_after_the_same_device_recovers() {
         let mut tracker = AlertTracker::default();
-        let low = device("one", 10, BatteryStatus::Discharging);
-        let charging = device("one", 10, BatteryStatus::Charging);
-        let recovered = device("one", 21, BatteryStatus::Discharging);
+        let low_one = device("one", 10, BatteryStatus::Discharging);
+        let low_two = device("two", 10, BatteryStatus::Discharging);
+        let recovered_one = device("one", 21, BatteryStatus::Discharging);
         let start = Instant::now();
 
-        assert!(
+        let devices = vec![low_one.clone(), low_two.clone()];
+        assert_eq!(
             tracker
-                .evaluate(Some(&low), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_some()
+                .evaluate(
+                    &devices,
+                    &monitored(&["one", "two"]),
+                    THRESHOLD,
+                    REPEAT_INTERVAL,
+                    start,
+                )
+                .len(),
+            2
         );
+
+        let devices = vec![recovered_one, low_two.clone()];
         assert!(
             tracker
                 .evaluate(
-                    Some(&charging),
+                    &devices,
+                    &monitored(&["one", "two"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL,
+                    start + Duration::from_secs(1),
                 )
-                .is_none()
+                .is_empty()
         );
-        assert!(
-            tracker
-                .evaluate(
-                    Some(&charging),
-                    THRESHOLD,
-                    REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL + Duration::from_secs(1),
-                )
-                .is_none()
+
+        let devices = vec![low_one, low_two];
+        let alerts = tracker.evaluate(
+            &devices,
+            &monitored(&["one", "two"]),
+            THRESHOLD,
+            REPEAT_INTERVAL,
+            start + Duration::from_secs(2),
         );
-        assert!(
-            tracker
-                .evaluate(
-                    Some(&recovered),
-                    THRESHOLD,
-                    REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL + Duration::from_secs(2),
-                )
-                .is_none()
-        );
-        assert!(
-            tracker
-                .evaluate(
-                    Some(&low),
-                    THRESHOLD,
-                    REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL + Duration::from_secs(3),
-                )
-                .is_some()
-        );
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].device_name, "Test device one");
     }
 
     #[test]
     fn charging_unknown_and_offline_devices_do_not_alert() {
         let mut tracker = AlertTracker::default();
-        let charging = device("one", 5, BatteryStatus::Charging);
-        let unknown = device("one", 5, BatteryStatus::Unknown);
-        let mut offline = device("one", 5, BatteryStatus::Discharging);
+        let charging = device("charging", 5, BatteryStatus::Charging);
+        let unknown = device("unknown", 5, BatteryStatus::Unknown);
+        let mut offline = device("offline", 5, BatteryStatus::Discharging);
         offline.online = false;
-        let start = Instant::now();
 
-        assert!(
-            tracker
-                .evaluate(Some(&charging), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_none()
-        );
+        let devices = vec![charging, unknown, offline];
         assert!(
             tracker
                 .evaluate(
-                    Some(&unknown),
+                    &devices,
+                    &monitored(&["charging", "unknown", "offline"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL,
+                    Instant::now(),
                 )
-                .is_none()
-        );
-        assert!(
-            tracker
-                .evaluate(
-                    Some(&offline),
-                    THRESHOLD,
-                    REPEAT_INTERVAL,
-                    start + REPEAT_INTERVAL,
-                )
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -325,77 +337,84 @@ mod tests {
         offline.online = false;
         let start = Instant::now();
 
-        assert!(
+        assert_eq!(
             tracker
-                .evaluate(Some(&low), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_some()
+                .evaluate(
+                    &[low.clone()],
+                    &monitored(&["one"]),
+                    THRESHOLD,
+                    REPEAT_INTERVAL,
+                    start,
+                )
+                .len(),
+            1
         );
         assert!(
             tracker
                 .evaluate(
-                    Some(&offline),
+                    &[offline],
+                    &monitored(&["one"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
                     start + REPEAT_INTERVAL,
                 )
-                .is_none()
+                .is_empty()
         );
-        assert!(
+        assert_eq!(
             tracker
                 .evaluate(
-                    Some(&low),
+                    &[low],
+                    &monitored(&["one"]),
                     THRESHOLD,
                     REPEAT_INTERVAL,
                     start + REPEAT_INTERVAL,
                 )
-                .is_some()
+                .len(),
+            1
         );
     }
 
     #[test]
-    fn changing_device_starts_a_new_alert_cycle() {
+    fn unselected_devices_do_not_alert_and_reselection_starts_a_cycle() {
         let mut tracker = AlertTracker::default();
-        let first = device("one", 10, BatteryStatus::Discharging);
-        let second = device("two", 10, BatteryStatus::Discharging);
+        let one = device("one", 10, BatteryStatus::Discharging);
+        let two = device("two", 10, BatteryStatus::Discharging);
         let start = Instant::now();
 
         assert!(
             tracker
-                .evaluate(Some(&first), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_some()
+                .evaluate(
+                    &[one.clone(), two.clone()],
+                    &monitored(&["one"]),
+                    THRESHOLD,
+                    REPEAT_INTERVAL,
+                    start,
+                )
+                .iter()
+                .all(|alert| alert.device_name == "Test device one")
         );
         assert!(
             tracker
                 .evaluate(
-                    Some(&second),
+                    &[one.clone(), two.clone()],
+                    &[],
                     THRESHOLD,
                     REPEAT_INTERVAL,
                     start + Duration::from_secs(1),
                 )
-                .is_some()
+                .is_empty()
         );
-    }
-
-    #[test]
-    fn changing_interval_applies_to_existing_alert_cycle() {
-        let mut tracker = AlertTracker::default();
-        let low = device("one", 10, BatteryStatus::Discharging);
-        let start = Instant::now();
-
-        assert!(
-            tracker
-                .evaluate(Some(&low), THRESHOLD, REPEAT_INTERVAL, start)
-                .is_some()
-        );
-        assert!(
+        assert_eq!(
             tracker
                 .evaluate(
-                    Some(&low),
+                    &[one, two],
+                    &monitored(&["two"]),
                     THRESHOLD,
-                    Duration::from_secs(60),
-                    start + Duration::from_secs(60),
+                    REPEAT_INTERVAL,
+                    start + Duration::from_secs(2),
                 )
-                .is_some()
+                .len(),
+            1
         );
     }
 }

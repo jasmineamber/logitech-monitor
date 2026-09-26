@@ -29,8 +29,8 @@ use windows::{
 
 use crate::{APP_DISPLAY_NAME, APP_USER_MODEL_ID};
 
-const INSTANCE_MUTEX_NAME: &str = "Local\\LogitechMonitor.Singleton.v1";
-const SHORTCUT_FILE_NAME: &str = "罗技电量管家.lnk";
+const INSTANCE_MUTEX_NAME: &str = "Local\\BatteryMonitor.Singleton.v1";
+const SHORTCUT_FILE_NAME: &str = "电量管家.lnk";
 
 pub(crate) struct SingleInstance {
     handle: HANDLE,
@@ -63,7 +63,7 @@ impl Drop for SingleInstance {
 }
 
 pub(crate) fn set_current_process_identity() -> Result<()> {
-    unsafe { SetCurrentProcessExplicitAppUserModelID(w!("LogitechMonitor.App")) }
+    unsafe { SetCurrentProcessExplicitAppUserModelID(w!("BatteryMonitor.App")) }
         .context("设置 Windows 应用身份失败")?;
     Ok(())
 }

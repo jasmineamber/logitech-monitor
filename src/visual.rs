@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
-const ICON_PNG: &[u8] = include_bytes!("../assets/logitech-monitor.png");
+const ICON_PNG: &[u8] = include_bytes!("../assets/battery-monitor.png");
 
 #[derive(Clone)]
 struct IconPixels {

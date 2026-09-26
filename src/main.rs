@@ -5,6 +5,9 @@ mod config;
 mod monitor;
 
 #[cfg(target_os = "windows")]
+mod mchose;
+
+#[cfg(target_os = "windows")]
 mod app_identity;
 
 #[cfg(target_os = "windows")]
@@ -18,11 +21,11 @@ use anyhow::{Context, Result};
 use battery::{BatteryInfo, BatteryLevel, BatteryStatus};
 use clap::{Parser, Subcommand};
 
-const APP_DISPLAY_NAME: &str = "罗技电量管家";
-const APP_USER_MODEL_ID: &str = "LogitechMonitor.App";
+const APP_DISPLAY_NAME: &str = "电量管家";
+const APP_USER_MODEL_ID: &str = "BatteryMonitor.App";
 
 #[derive(Debug, Parser)]
-#[command(name = "logitech-monitor", about = "Read Logitech HID++ device status")]
+#[command(name = "battery-monitor", about = "Read supported HID device status")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -30,7 +33,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// List Logitech HID++ devices and their battery status.
+    /// List supported HID devices and their battery status.
     Devices,
     /// Send a Windows Toast notification to verify notifications work.
     NotifyTest,
@@ -58,14 +61,14 @@ fn run_tray() -> Result<()> {
     }
 
     #[cfg(not(target_os = "windows"))]
-    anyhow::bail!("logitech-monitor tray mode currently supports Windows only")
+    anyhow::bail!("battery-monitor tray mode currently supports Windows only")
 }
 
 async fn list_devices() -> Result<()> {
-    let devices = battery::enumerate().await.context("读取罗技设备信息失败")?;
+    let devices = battery::enumerate().await.context("读取设备信息失败")?;
 
     if devices.is_empty() {
-        println!("未找到罗技 HID++ 设备。");
+        println!("未找到兼容 HID 设备。");
         return Ok(());
     }
 
@@ -134,7 +137,7 @@ fn send_test_notification() -> Result<()> {
 
 #[cfg(not(target_os = "windows"))]
 fn send_test_notification() -> Result<()> {
-    anyhow::bail!("logitech-monitor currently supports notifications on Windows only")
+    anyhow::bail!("battery-monitor currently supports notifications on Windows only")
 }
 
 #[cfg(test)]

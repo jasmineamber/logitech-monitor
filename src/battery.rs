@@ -43,7 +43,7 @@ pub(crate) async fn enumerate() -> Result<Vec<DeviceSnapshot>> {
         .await
         .context("读取罗技 HID++ 设备失败")?;
 
-    Ok(inventories
+    let mut devices = inventories
         .iter()
         .flat_map(|inventory| {
             inventory.paired.iter().map(move |device| DeviceSnapshot {
@@ -65,7 +65,17 @@ pub(crate) async fn enumerate() -> Result<Vec<DeviceSnapshot>> {
                 battery: device.battery.as_ref().map(map_battery),
             })
         })
-        .collect())
+        .collect::<Vec<_>>();
+
+    #[cfg(target_os = "windows")]
+    {
+        let mchose_devices = tokio::task::spawn_blocking(crate::mchose::enumerate)
+            .await
+            .context("MCHOSE HID 扫描任务失败")??;
+        devices.extend(mchose_devices);
+    }
+
+    Ok(devices)
 }
 
 fn stable_device_id(
